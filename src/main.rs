@@ -196,6 +196,13 @@ pub fn TagEditor() -> Element {
         );
     });
 
+    // 창 최상단 고정 해제 및 타이틀 설정
+    use_effect(move || {
+        let win = dioxus::desktop::window();
+        win.set_always_on_top(false);
+        win.set_title("Music Tag Editor");
+    });
+
     // 왼쪽 패널: 루트 폴더, 접힌 폴더 목록, 선택된 파일 경로, 커버 미리보기
     let mut folder_path = use_signal(|| Option::<PathBuf>::None);
     let mut collapsed_dirs = use_signal(HashSet::<PathBuf>::new);
@@ -508,6 +515,14 @@ pub fn TagEditor() -> Element {
                     "태그 저장 완료!".to_string()
                 };
                 status_msg.set(Some((true, msg)));
+                
+                document::eval(
+                    r#"
+                    setTimeout(() => {
+                        document.querySelector('.file-item.active')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                    }, 40);
+                    "#,
+                );
             }
             Err(err) => {
                 status_msg.set(Some((false, format!("태그 수정 실패: {err}"))));
@@ -598,7 +613,14 @@ pub fn TagEditor() -> Element {
 
         status_msg.set(Some((true, format!("폴더 자동분류 완료!\n→ {rel_display}"))));
         document::eval(
-            "document.querySelector('.file-item.active')?.scrollIntoView({ block: 'nearest' })",
+            r#"
+            setTimeout(() => {
+                const list = document.querySelector('.file-list');
+                const active = document.querySelector('.file-item.active');
+                if (list) list.focus({ preventScroll: true });
+                if (active) active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }, 40);
+            "#,
         );
     };
 
