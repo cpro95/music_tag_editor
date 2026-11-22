@@ -1,25 +1,104 @@
-# Development
+# Music Tag Editor
 
-Your new bare-bones project includes minimal organization with a single `main.rs` file and a few assets.
+Rust와 **Dioxus Desktop**으로 만든 경량 데스크톱 오디오 메타데이터 편집기 및 폴더 정리 도구입니다.  
+`.opus`, `.mp3`, `.ogg`, `.flac` 파일의 태그를 직접 수정하고, Spotify 웹에서 복사한 곡 정보를 자동으로 분석해 파일명 변경과 `{아티스트}/{앨범}` 폴더 정리까지 한 번에 처리할 수 있습니다.
 
-```
-project/
-├─ assets/ # Any assets that are used by the app should be placed here
-├─ src/
-│  ├─ main.rs # main.rs is the entry point to your application and currently contains all components for the app
-├─ Cargo.toml # The Cargo.toml file defines the dependencies and feature flags for your project
-```
+---
 
-### Serving Your App
+## 주요 기능
 
-Run the following command in the root of your project to start developing with the default platform:
+### 1. 폴더 트리 탐색기 (왼쪽 패널)
+- **네이티브 폴더 선택 (`rfd`)**: 선택한 루트 폴더와 하위 폴더를 재귀적으로 탐색해 `.opus`, `.mp3`, `.ogg`, `.flac` 파일만 표시합니다.
+- **접기/펼치기 지원**: 폴더 클릭 시 하위 트리를 접거나 펼칠 수 있으며, 오디오 파일이 없는 빈 폴더는 표시하지 않습니다.
+- **키보드 탐색**: 마우스 클릭뿐만 아니라 키보드 방향키(`↑`, `↓`)로 목록을 빠르게 이동할 수 있습니다.
 
+### 2. 앨범 커버 미리보기
+- 각 앨범 폴더에 있는 커버 이미지(`cover.jpg`, `cover.jpeg`, `cover.webp`, `cover.png`)를 자동으로 인식합니다.
+- 커버 이미지가 포함된 폴더에는 트리 옆에 `🖼️` 배지가 표시되며, 파일이나 폴더를 선택하면 왼쪽 하단 뷰어에 앨범 커버가 나타납니다.
+
+### 3. 백그라운드 음악 재생 (`ffplay`)
+- 왼쪽 파일 목록에서 곡을 선택한 뒤 **`Space`** 키를 누르면 `ffplay`로 백그라운드 재생/정지를 토글할 수 있습니다.
+- 미니 재생 상태 바에서 현재 재생 중인 곡을 확인하거나 `⏹ 정지` 버튼으로 멈출 수 있습니다.
+- 곡 전환, 파일 수정/이동, 앱 종료 시 백그라운드 `ffplay` 프로세스를 자동으로 안전하게 종료합니다.
+
+### 4. 현재 태그 조회 및 Spotify 메타정보 자동 분석
+- 선택한 오디오 파일에 이미 저장된 메타데이터(`Title`, `Artist`, `Album Artist`, `Album`, `Year`)를 상단 카드에서 바로 확인할 수 있습니다.
+- Spotify 웹에서 복사한 곡 정보를 붙여넣고 **`메타정보 분석하기`**를 누르면 `•` 구분 기호를 걸러내고 각 입력 칸에 자동으로 채워줍니다.
+  ```text
+  타이틀
+  아티스트
+  앨범아티스트
+  •
+  앨범명
+  •
+  년도
+  ```
+
+### 5. 태그 직접 저장 및 폴더 자동분류
+- **`태그 저장 및 파일명 변경`**: `lofty` 크레이트를 사용해 오디오 파일에 태그를 직접 기록하고, `Title`을 기준으로 같은 폴더 내에서 파일명을 `{Title}.{확장자}`로 변경합니다.
+- **`📂 폴더 자동분류하기`**: 파일의 태그를 기준으로 **`{루트 폴더}/{Album Artist 또는 Artist}/{Album}/{파일명}`** 구조로 폴더를 자동 생성하고 파일을 이동합니다.
+  - 이미 올바른 폴더 구조에 들어가 있는 파일은 버튼이 비활성화되어 중복 실행을 방지합니다.
+
+---
+
+## 단축키 (왼쪽 파일 목록 포커스 시)
+
+| 키 | 동작 |
+| :--- | :--- |
+| `↑` / `↓` | 이전 / 다음 오디오 파일 선택 |
+| `Space` | 선택된 곡 백그라운드 재생 / 정지 토글 |
+
+---
+
+## 사전 준비
+
+1. **Rust 툴체인** (`rustup`, `cargo`)
+2. **Dioxus CLI** *(개발 핫 리로드 및 앱 번들링 시)*
+   ```bash
+   cargo install dioxus-cli
+   ```
+3. **FFmpeg / ffplay** *(백그라운드 음악 재생 기능 사용 시 필요)*
+   - **macOS (Homebrew)**:
+     ```bash
+     brew install ffmpeg
+     ```
+   - **Windows / Linux**: `ffmpeg` 패키지를 설치하고 `ffplay`가 시스템 `PATH`에 등록되어 있어야 합니다.
+
+---
+
+## 실행 및 빌드
+
+### 개발 모드 실행
 ```bash
-dx serve
-```
+# Cargo로 바로 실행
+cargo run
 
-To run for a different platform, use the `--platform platform` flag. E.g.
-```bash
+# 또는 Dioxus CLI 핫 리로드 실행
 dx serve --platform desktop
 ```
+
+### 배포용 데스크톱 앱 번들링 (`.app` / `.dmg` / `.exe` 등)
+```bash
+dx bundle --platform desktop
+```
+> **참고**: 번들 아이콘 설정은 `Dioxus.toml`의 `[bundle]` 항목(`assets/icon.icns`, `assets/favicon.ico`)을 사용합니다.
+
+---
+
+## 사용 흐름
+
+1. 왼쪽 상단 **`📁 폴더 선택`** 버튼을 눌러 음악 파일이 있는 루트 폴더를 엽니다.
+2. 목록에서 곡을 고르고 필요 시 **`Space`** 키로 재생해 곡을 확인합니다.
+3. Spotify에서 복사한 곡 정보를 붙여넣고 **`메타정보 분석하기`**를 클릭합니다. *(또는 상단 카드의 `입력칸으로 불러오기`로 기존 태그를 불러와 수정합니다.)*
+4. 내용을 확인한 뒤 **`태그 저장 및 파일명 변경`**을 누릅니다.
+5. 이어서 **`📂 폴더 자동분류하기`**를 누르면 `{아티스트}/{앨범}` 폴더로 파일이 자동 이동됩니다.
+
+---
+
+## 기술 스택
+
+- **UI Framework**: [Dioxus](https://dioxuslabs.com/) (Desktop)
+- **Audio Metadata**: [lofty](https://crates.io/crates/lofty)
+- **Native File Dialog**: [rfd](https://crates.io/crates/rfd)
+- **Audio Playback**: `ffplay` (FFmpeg)
 

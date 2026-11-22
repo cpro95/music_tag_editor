@@ -139,6 +139,63 @@ pub fn TagEditor() -> Element {
         );
     });
 
+    // 좌/우 패널 경계선 드래그 리사이즈 (더블클릭 시 300px 초기화)
+    use_effect(move || {
+        document::eval(
+            r#"
+            if (!window.__musicResizerInit) {
+                window.__musicResizerInit = true;
+                const savedWidth = localStorage.getItem('musicTagEditor.leftWidth');
+                if (savedWidth) {
+                    document.documentElement.style.setProperty('--left-width', savedWidth + 'px');
+                }
+
+                let isResizing = false;
+                const minLeft = 200;
+                const minRight = 380;
+
+                const stopResize = () => {
+                    if (!isResizing) return;
+                    isResizing = false;
+                    document.body.style.userSelect = '';
+                    document.body.style.cursor = '';
+                    document.querySelector('.resizer')?.classList.remove('active');
+                };
+
+                document.addEventListener('pointerdown', (e) => {
+                    const resizer = e.target?.closest?.('.resizer');
+                    if (!resizer) return;
+                    e.preventDefault();
+                    isResizing = true;
+                    resizer.classList.add('active');
+                    resizer.setPointerCapture?.(e.pointerId);
+                    document.body.style.userSelect = 'none';
+                    document.body.style.cursor = 'col-resize';
+                });
+
+                document.addEventListener('pointermove', (e) => {
+                    if (!isResizing) return;
+                    const maxLeft = Math.max(minLeft, window.innerWidth - minRight);
+                    const nextWidth = Math.min(maxLeft, Math.max(minLeft, Math.round(e.clientX)));
+                    document.documentElement.style.setProperty('--left-width', nextWidth + 'px');
+                    localStorage.setItem('musicTagEditor.leftWidth', String(nextWidth));
+                });
+
+                document.addEventListener('pointerup', stopResize);
+                document.addEventListener('pointercancel', stopResize);
+                window.addEventListener('blur', stopResize);
+
+                document.addEventListener('dblclick', (e) => {
+                    if (e.target?.closest?.('.resizer')) {
+                        document.documentElement.style.setProperty('--left-width', '300px');
+                        localStorage.setItem('musicTagEditor.leftWidth', '300');
+                    }
+                });
+            }
+            "#,
+        );
+    });
+
     // 왼쪽 패널: 루트 폴더, 접힌 폴더 목록, 선택된 파일 경로, 커버 미리보기
     let mut folder_path = use_signal(|| Option::<PathBuf>::None);
     let mut collapsed_dirs = use_signal(HashSet::<PathBuf>::new);
@@ -702,6 +759,12 @@ pub fn TagEditor() -> Element {
                 }
             }
 
+            // ================= 드래그 가능한 경계선 =================
+            div {
+                class: "resizer",
+                title: "드래그하여 폭 조절 (더블클릭 시 기본 폭 복원)",
+            }
+
             // ================= 오른쪽 패널: 현재 메타정보 & 편집기 =================
             main { class: "right-pane",
                 header { class: "header-row",
@@ -709,10 +772,10 @@ pub fn TagEditor() -> Element {
                         img {
                             src: HEADER_SVG,
                             class: "header-logo",
-                            alt: "Musig Tag Editor Logo",
+                            alt: "Music Tag Editor Logo",
                         }
                         div { class: "header",
-                            h1 { "Musig Tag Editor" }
+                            h1 { "Music Tag Editor" }
                             p { "OPUS / MP3 / OGG / FLAC 메타데이터 편집기" }
                         }
                     }

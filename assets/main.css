@@ -12,21 +12,20 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-/* 좌/우 2단 분할 레이아웃 */
+/* 좌/우 2단 분할 레이아웃 + 가운데 리사이저 */
 .app-shell {
     display: grid;
-    grid-template-columns: 300px 1fr;
+    grid-template-columns: var(--left-width, 300px) 6px 1fr;
     height: 100vh;
     overflow: hidden;
 }
 
-/* ================= 왼쪽 패널 ================= */
+/* .left-pane에서 기존 border-right는 지워도 됩니다 (.resizer가 경계선 역할) */
 .left-pane {
     display: flex;
     flex-direction: column;
     height: 100vh;
     background-color: #0d1117;
-    border-right: 1px solid #30363d;
     padding: 16px;
     gap: 12px;
     overflow: hidden;
@@ -640,4 +639,20 @@ body {
 .btn-stop:hover {
     background-color: rgba(248, 81, 73, 0.15);
     border-color: #f85149;
+}
+
+/* 드래그 경계선 */
+.resizer {
+    width: 6px;
+    height: 100vh;
+    cursor: col-resize;
+    background-color: #0d1117;
+    border-left: 1px solid #30363d;
+    transition: background-color 0.15s, border-color 0.15s;
+}
+
+.resizer:hover,
+.resizer.active {
+    background-color: rgba(88, 166, 255, 0.25);
+    border-left-color: #58a6ff;
 }
