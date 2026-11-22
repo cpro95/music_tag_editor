@@ -1,5 +1,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use dioxus::desktop::{
+    tao::event::{Event, WindowEvent},
+    use_wry_event_handler,
+};
 use dioxus::prelude::*;
 use lofty::config::WriteOptions;
 use lofty::prelude::*;
@@ -48,8 +54,39 @@ enum TreeEntry {
     },
 }
 
+/// 백그라운드 ffplay 프로세스 관리 (Drop 시 자동 종료)
+struct ActivePlayback {
+    path: PathBuf,
+    child: Child,
+}
+
+impl Drop for ActivePlayback {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// 앱 종료 시에도 확실히 정리하기 위해 전역으로 프로세스 보관
+static ACTIVE_PLAYBACK: Mutex<Option<ActivePlayback>> = Mutex::new(None);
+
+fn stop_global_playback() {
+    if let Ok(mut guard) = ACTIVE_PLAYBACK.lock() {
+        *guard = None;
+    }
+}
+
+struct PlaybackCleanupGuard;
+
+impl Drop for PlaybackCleanupGuard {
+    fn drop(&mut self) {
+        stop_global_playback();
+    }
+}
+
 fn main() {
     dioxus::launch(App);
+    stop_global_playback();
 }
 
 #[component]
@@ -63,6 +100,45 @@ fn App() -> Element {
 
 #[component]
 pub fn TagEditor() -> Element {
+    // 컴포넌트 언마운트 시 ffplay 정리
+    use_hook(|| std::rc::Rc::new(PlaybackCleanupGuard));
+
+    // 창 닫기(X) 또는 앱 종료(Cmd+Q 등) 시 즉시 ffplay 강제 종료
+    use_wry_event_handler(move |event, _target| match event {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested | WindowEvent::Destroyed,
+            ..
+        }
+        | Event::LoopDestroyed => {
+            stop_global_playback();
+        }
+        _ => {}
+    });
+
+    // macOS WKWebView에서 Space/방향키 첫 입력 시 시스템 경고음(NSBeep) 방지
+    use_effect(move || {
+        document::eval(
+            r#"
+            if (!window.__musigKeyFix) {
+                window.__musigKeyFix = true;
+                const preventNavBeep = (e) => {
+                    const list = document.querySelector('.file-list');
+                    if (!list) return;
+                    const active = document.activeElement;
+                    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+                    if (active === list || list.contains(active)) {
+                        if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                            e.preventDefault();
+                        }
+                    }
+                };
+                window.addEventListener('keydown', preventNavBeep, true);
+                window.addEventListener('keypress', preventNavBeep, true);
+            }
+            "#,
+        );
+    });
+
     // 왼쪽 패널: 루트 폴더, 접힌 폴더 목록, 선택된 파일 경로, 커버 미리보기
     let mut folder_path = use_signal(|| Option::<PathBuf>::None);
     let mut collapsed_dirs = use_signal(HashSet::<PathBuf>::new);
@@ -70,6 +146,9 @@ pub fn TagEditor() -> Element {
     let mut tree_entries = use_signal(Vec::<TreeEntry>::new);
     let mut total_file_count = use_signal(|| 0usize);
     let mut cover_preview = use_signal(|| Option::<CoverPreview>::None);
+
+    // UI 표시용 현재 재생 중인 곡 정보: (파일 경로, 파일명)
+    let mut playing_info = use_signal(|| Option::<(PathBuf, String)>::None);
 
     // 오른쪽 상단: 현재 선택된 파일에서 읽어온 기존 메타데이터
     let mut current_meta = use_signal(|| Option::<AudioMetadata>::None);
@@ -85,6 +164,12 @@ pub fn TagEditor() -> Element {
     // 상태 알림 메시지: (성공 여부, 메시지)
     let mut status_msg = use_signal(|| Option::<(bool, String)>::None);
 
+    // 재생 정지 공통 헬퍼
+    let mut stop_playback = move || {
+        stop_global_playback();
+        playing_info.set(None);
+    };
+
     // 트리 목록 다시 빌드
     let mut refresh_tree = move |root: &Path| {
         let collapsed = collapsed_dirs.read().clone();
@@ -93,7 +178,7 @@ pub fn TagEditor() -> Element {
         tree_entries.set(entries);
     };
 
-    // 특정 경로의 파일을 선택하고 현재 메타데이터 + 해당 폴더 cover.jpg 읽기
+    // 특정 경로의 파일을 선택하고 현재 메타데이터 + 해당 폴더 cover 읽기
     let mut select_file_path = move |path: PathBuf| {
         selected_path.set(Some(path.clone()));
         cover_preview.set(path.parent().and_then(load_cover_preview));
@@ -108,11 +193,66 @@ pub fn TagEditor() -> Element {
                 status_msg.set(Some((false, err)));
             }
         }
+        document::eval("document.querySelector('.file-list')?.focus()");
+    };
+
+    // 스페이스바로 선택된 곡 재생 / 정지 토글
+    let mut toggle_play = move |target: PathBuf| {
+        // 이미 자연 종료된 프로세스가 남아있다면 정리
+        let already_finished = {
+            if let Ok(mut guard) = ACTIVE_PLAYBACK.lock() {
+                if let Some(pb) = guard.as_mut() {
+                    matches!(pb.child.try_wait(), Ok(Some(_)))
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if already_finished {
+            stop_playback();
+        }
+
+        // 같은 곡이 재생 중이면 정지
+        let is_same_playing = ACTIVE_PLAYBACK
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|pb| pb.path == target))
+            .unwrap_or(false);
+        if is_same_playing {
+            stop_playback();
+            return;
+        }
+
+        // 다른 곡이 재생 중이었다면 먼저 정지
+        stop_playback();
+
+        match spawn_ffplay(&target) {
+            Ok(child) => {
+                let file_name = target
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Ok(mut guard) = ACTIVE_PLAYBACK.lock() {
+                    *guard = Some(ActivePlayback {
+                        path: target.clone(),
+                        child,
+                    });
+                }
+                playing_info.set(Some((target, file_name)));
+            }
+            Err(err) => {
+                status_msg.set(Some((false, err)));
+            }
+        }
     };
 
     // 왼쪽: 폴더 선택 버튼
     let on_pick_folder = move |_| {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            stop_playback();
             collapsed_dirs.set(HashSet::new());
             folder_path.set(Some(dir.clone()));
 
@@ -127,7 +267,6 @@ pub fn TagEditor() -> Element {
 
             if let Some(first) = first_file {
                 select_file_path(first);
-                document::eval("document.querySelector('.file-list')?.focus()");
             } else {
                 selected_path.set(None);
                 current_meta.set(None);
@@ -141,8 +280,20 @@ pub fn TagEditor() -> Element {
         }
     };
 
-    // 왼쪽: 키보드 위/아래 방향키로 보이는 오디오 파일 이동
+    // 왼쪽: 키보드 위/아래 방향키 이동 및 Space 재생/정지
     let on_list_keydown = move |evt: KeyboardEvent| {
+        match evt.key() {
+            Key::Character(ref s) if s == " " => {
+                evt.prevent_default();
+                if let Some(path) = selected_path.read().clone() {
+                    toggle_play(path);
+                }
+                return;
+            }
+            Key::ArrowDown | Key::ArrowUp => {}
+            _ => return,
+        }
+
         let visible_files: Vec<PathBuf> = tree_entries
             .read()
             .iter()
@@ -262,6 +413,15 @@ pub fn TagEditor() -> Element {
             return;
         }
 
+        // 현재 재생 중인 파일이면 수정 전 정지
+        let is_playing_this = playing_info
+            .read()
+            .as_ref()
+            .is_some_and(|(p, _)| p == &path);
+        if is_playing_this {
+            stop_playback();
+        }
+
         match apply_tags_and_rename(
             &path,
             &title.read(),
@@ -335,6 +495,15 @@ pub fn TagEditor() -> Element {
             return;
         }
 
+        // 현재 재생 중인 파일이면 이동 전 정지
+        let is_playing_this = playing_info
+            .read()
+            .as_ref()
+            .is_some_and(|(p, _)| p == &meta.file_path);
+        if is_playing_this {
+            stop_playback();
+        }
+
         if let Some(target_dir) = target_path.parent() {
             if let Err(err) = std::fs::create_dir_all(target_dir) {
                 status_msg.set(Some((false, format!("폴더 생성 실패: {err}"))));
@@ -381,6 +550,7 @@ pub fn TagEditor() -> Element {
     let current_root = folder_path.read().clone();
     let meta_snapshot = current_meta.read().clone();
     let cover_snapshot = cover_preview.read().clone();
+    let playing_snapshot = playing_info.read().clone();
 
     let is_already_organized = match (&current_root, &meta_snapshot) {
         (Some(root), Some(meta)) => compute_target_organize_path(root, meta)
@@ -390,7 +560,7 @@ pub fn TagEditor() -> Element {
 
     rsx! {
         div { class: "app-shell",
-            // ================= 왼쪽 패널: 폴더 선택 & 트리 & 앨범 커버 뷰어 =================
+            // ================= 왼쪽 패널: 폴더 선택 & 트리 & 플레이어 & 커버 =================
             aside { class: "left-pane",
                 div { class: "left-header",
                     button { class: "btn-folder", onclick: on_pick_folder, "📁 폴더 선택" }
@@ -454,7 +624,7 @@ pub fn TagEditor() -> Element {
                                             span { class: "dir-icon", "📂" }
                                             span { class: "dir-name", title: "{name}", "{name}" }
                                             if has_cover {
-                                                span { class: "cover-badge", title: "cover.jpg 있음", "🖼️" }
+                                                span { class: "cover-badge", title: "앨범 커버 있음", "🖼️" }
                                             }
                                             span { class: "dir-count", "{file_count}" }
                                         }
@@ -463,6 +633,9 @@ pub fn TagEditor() -> Element {
                                 TreeEntry::File { path, name, ext, depth } => {
                                     let indent_px = 10 + depth * 14;
                                     let is_active = current_selected.as_ref() == Some(&path);
+                                    let is_playing_row = playing_snapshot
+                                        .as_ref()
+                                        .is_some_and(|(p, _)| p == &path);
                                     let file_for_click = path.clone();
                                     rsx! {
                                         div {
@@ -473,6 +646,9 @@ pub fn TagEditor() -> Element {
                                                 select_file_path(file_for_click.clone());
                                             },
                                             span { class: "ext-badge", "{ext}" }
+                                            if is_playing_row {
+                                                span { class: "playing-icon", "🔊" }
+                                            }
                                             span { class: "item-name", title: "{name}", "{name}" }
                                         }
                                     }
@@ -482,7 +658,24 @@ pub fn TagEditor() -> Element {
                     }
                 }
 
-                // 왼쪽 하단: 선택된 앨범 폴더의 cover.jpg 뷰어
+                // 미니 재생 상태 바
+                if let Some((_, playing_name)) = playing_snapshot {
+                    div { class: "player-bar playing",
+                        span { class: "player-dot", "▶" }
+                        span { class: "player-title", title: "{playing_name}", "{playing_name}" }
+                        button {
+                            class: "btn-stop",
+                            onclick: move |_| stop_playback(),
+                            "⏹ 정지"
+                        }
+                    }
+                } else {
+                    div { class: "player-bar idle",
+                        span { "Space: 선택된 곡 재생 / 정지" }
+                    }
+                }
+
+                // 왼쪽 하단: 선택된 앨범 폴더의 cover 이미지 뷰어
                 div { class: "cover-panel",
                     if let Some(cover) = cover_snapshot.as_ref() {
                         div { class: "cover-art-wrap",
@@ -503,7 +696,7 @@ pub fn TagEditor() -> Element {
                     } else {
                         div { class: "cover-empty",
                             span { class: "cover-empty-icon", "💿" }
-                            p { "cover.jpg 없음" }
+                            p { "커버 이미지 없음" }
                         }
                     }
                 }
@@ -670,6 +863,38 @@ pub fn TagEditor() -> Element {
     }
 }
 
+fn find_ffplay_command() -> &'static str {
+    for candidate in [
+        "/opt/homebrew/bin/ffplay",
+        "/usr/local/bin/ffplay",
+        "/opt/local/bin/ffplay",
+    ] {
+        if Path::new(candidate).is_file() {
+            return candidate;
+        }
+    }
+    "ffplay"
+}
+
+fn spawn_ffplay(path: &Path) -> Result<Child, String> {
+    let bin = find_ffplay_command();
+    let mut cmd = Command::new(bin);
+    cmd.args(["-nodisp", "-vn", "-autoexit", "-loglevel", "quiet"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+
+    cmd.spawn()
+        .map_err(|e| format!("ffplay 실행 실패 ({e}). ffmpeg/ffplay가 설치되어 있는지 확인해 주세요."))
+}
+
 fn display_or_empty(s: &str) -> &str {
     if s.trim().is_empty() {
         "(비어 있음)"
@@ -678,13 +903,14 @@ fn display_or_empty(s: &str) -> &str {
     }
 }
 
-/// 폴더 내 cover.jpg (또는 cover.jpeg / cover.png) 파일 탐색
+/// 폴더 내 cover 이미지(jpg, jpeg, webp, png) 파일 탐색
 fn find_cover_in_dir(dir: &Path) -> Option<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return None;
     };
 
     let mut found_jpeg = None;
+    let mut found_webp = None;
     let mut found_png = None;
 
     for entry in entries.flatten() {
@@ -695,20 +921,20 @@ fn find_cover_in_dir(dir: &Path) -> Option<PathBuf> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let lower = name.to_lowercase();
-        if lower == "cover.jpg" {
-            return Some(path);
-        } else if lower == "cover.jpeg" && found_jpeg.is_none() {
-            found_jpeg = Some(path);
-        } else if lower == "cover.png" && found_png.is_none() {
-            found_png = Some(path);
+
+        match name.to_lowercase().as_str() {
+            "cover.jpg" => return Some(path),
+            "cover.jpeg" if found_jpeg.is_none() => found_jpeg = Some(path),
+            "cover.webp" if found_webp.is_none() => found_webp = Some(path),
+            "cover.png" if found_png.is_none() => found_png = Some(path),
+            _ => {}
         }
     }
 
-    found_jpeg.or(found_png)
+    found_jpeg.or(found_webp).or(found_png)
 }
 
-/// cover.jpg를 읽어 Data URI로 변환
+/// cover 이미지(jpg, jpeg, webp, png)를 읽어 Data URI로 변환
 fn load_cover_preview(dir: &Path) -> Option<CoverPreview> {
     let cover_path = find_cover_in_dir(dir)?;
     let bytes = std::fs::read(&cover_path).ok()?;
@@ -718,7 +944,12 @@ fn load_cover_preview(dir: &Path) -> Option<CoverPreview> {
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
-    let mime = if ext == "png" { "image/png" } else { "image/jpeg" };
+
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => "image/jpeg",
+    };
 
     let data_uri = format!("data:{mime};base64,{}", encode_base64(&bytes));
     let folder_name = dir
@@ -729,7 +960,7 @@ fn load_cover_preview(dir: &Path) -> Option<CoverPreview> {
     let file_name = cover_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("cover.jpg")
+        .unwrap_or("cover")
         .to_string();
 
     Some(CoverPreview {
